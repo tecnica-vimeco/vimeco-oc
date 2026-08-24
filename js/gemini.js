@@ -1,10 +1,152 @@
 /* global GEMINI_API_KEY */
 
-const GEMINI_ENDPOINT =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+/*
+ * Motor de llamadas a Gemini: una sola función para las 5 lecturas de la app.
+ *
+ * El tier gratuito da cupo POR MODELO y por día (los Flash grandes dan 20; los
+ * Flash-Lite 3.x, 500), así que un único modelo titular deja la app sin IA a
+ * media tarde. `callGemini` recorre una cadena de modelos y salta al siguiente
+ * cuando el de arriba está sin cupo (429), caído (5xx) o tarda de más. Los 400
+ * NO saltan: si el pedido está mal armado, en otro modelo va a estar igual.
+ *
+ * El modelo agotado se recuerda en localStorage para no gastar un viaje de red
+ * en cada lectura por el resto del día. OJO: la cuota se resetea a MEDIANOCHE
+ * DEL PACÍFICO, no local — por eso la marca guarda el día en esa zona horaria.
+ */
+const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 
-const GEMINI_LITE_ENDPOINT =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent';
+// `cfg` se mergea sobre el generationConfig de cada pedido:
+// - mediaResolution HIGH en los lite: sin eso pierden dígitos en fotos de celular.
+// - thinkingLevel minimal en 3.6: por defecto piensa de más y tarda ~25s.
+const G_LITE_35  = { id: 'gemini-3.5-flash-lite', cfg: { mediaResolution: 'MEDIA_RESOLUTION_HIGH' } };
+const G_LITE_31  = { id: 'gemini-3.1-flash-lite', cfg: { mediaResolution: 'MEDIA_RESOLUTION_HIGH' } };
+const G_FLASH_36 = { id: 'gemini-3.6-flash',      cfg: { thinkingConfig: { thinkingLevel: 'minimal' } } };
+const G_FLASH_25 = { id: 'gemini-2.5-flash',      cfg: {} };
+
+// Documentos impresos (presupuesto, factura, ticket): en el banco de pruebas del
+// 04/08 los lite leyeron los 55 precios igual que los grandes y 4x más rápido.
+const CADENA_DOC = [G_LITE_35, G_LITE_31, G_FLASH_36, G_FLASH_25];
+
+// Remitos: manuscritos y fotos torcidas, sin banco de pruebas propio todavía.
+// Arranca por el modelo grande y deja los lite como red para cuando se agote.
+const CADENA_REMITO = [G_FLASH_36, G_LITE_35, G_LITE_31, G_FLASH_25];
+
+// Audio: sólo los modelos con los que ya se probó el dictado.
+const CADENA_AUDIO = [G_FLASH_25, G_FLASH_36];
+
+const GEMINI_AGOTADOS_KEY = 'vimeco_gemini_agotados';
+const modelosSinNombre    = new Set();   // 404: nombre que esta API todavía no sirve
+
+// La cuota diaria de Gemini corta a medianoche del Pacífico.
+function diaPacifico() {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles', year: 'numeric', month: '2-digit', day: '2-digit'
+    }).format(new Date());
+  } catch {
+    return new Date().toISOString().slice(0, 10);
+  }
+}
+
+function agotadosHoy() {
+  try {
+    const guardado = JSON.parse(localStorage.getItem(GEMINI_AGOTADOS_KEY) || '{}');
+    const hoy = diaPacifico();
+    return Object.fromEntries(Object.entries(guardado).filter(([, dia]) => dia === hoy));
+  } catch {
+    return {};
+  }
+}
+
+function marcarAgotado(modeloId) {
+  try {
+    const actual = agotadosHoy();
+    actual[modeloId] = diaPacifico();
+    localStorage.setItem(GEMINI_AGOTADOS_KEY, JSON.stringify(actual));
+  } catch { /* sin localStorage la cascada sigue funcionando, sólo reintenta */ }
+}
+
+function geminiApiKey() {
+  const key = typeof GEMINI_API_KEY !== 'undefined' ? GEMINI_API_KEY : null;
+  if (!key || key === 'AQUI_VA_LA_KEY' || key.includes('%%')) {
+    throw new Error('No hay API Key configurada. Editá js/config.js con tu clave de Gemini.');
+  }
+  return key;
+}
+
+async function callGemini(cadena, body, opts = {}) {
+  const apiKey   = geminiApiKey();
+  const timeout  = opts.timeout || 60000;
+  const agotados = agotadosHoy();
+  const saltar   = m => agotados[m.id] || modelosSinNombre.has(m.id);
+
+  // Los descartados van al final en vez de excluirse: si la cadena entera está
+  // marcada, más vale intentar igual que fallar sin haber pedido nada.
+  const orden = [...cadena.filter(m => !saltar(m)), ...cadena.filter(saltar)];
+
+  let ultimoError = null;
+
+  for (const modelo of orden) {
+    const payload = {
+      ...body,
+      generationConfig: { ...(body.generationConfig || {}), ...modelo.cfg }
+    };
+
+    let response;
+    try {
+      response = await fetch(`${GEMINI_BASE}/${modelo.id}:generateContent?key=${apiKey}`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(payload),
+        signal:  AbortSignal.timeout(timeout)
+      });
+    } catch (err) {
+      // Timeout o red: probamos el siguiente, que suele ser más rápido.
+      ultimoError = (err.name === 'TimeoutError' || err.name === 'AbortError')
+        ? new Error(opts.msgTimeout || 'La solicitud a Gemini tardó demasiado.')
+        : err;
+      continue;
+    }
+
+    if (response.ok) {
+      const data = await response.json();
+      if (data.candidates?.length) {
+        // Queda a mano para diagnosticar desde la consola con qué modelo se leyó.
+        try { window.__geminiUltimoModelo = modelo.id; } catch { /* sin window, da igual */ }
+        return { data, modelo: modelo.id };
+      }
+      ultimoError = new Error(opts.msgVacio || 'Gemini no devolvió una respuesta utilizable.');
+      continue;
+    }
+
+    const errData = await response.json().catch(() => ({}));
+    ultimoError = new Error(`Error de API Gemini: ${errData?.error?.message || `HTTP ${response.status}`}`);
+
+    if (response.status === 429) { marcarAgotado(modelo.id);      continue; }
+    if (response.status === 404) { modelosSinNombre.add(modelo.id); continue; }
+    if (response.status >= 500)  { continue; }
+
+    throw ultimoError;   // 400/403: el pedido o la key están mal para todos por igual
+  }
+
+  throw ultimoError || new Error('No se pudo contactar a Gemini.');
+}
+
+function textoGemini(data) {
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
+
+// Los modelos a veces envuelven el JSON en ```json o le cuelgan una frase.
+function jsonDeTexto(texto, msgError) {
+  const limpio = texto.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
+  const ini = limpio.indexOf('{'), fin = limpio.lastIndexOf('}');
+  if (ini === -1 || fin === -1) throw new Error(msgError || 'Respuesta inesperada de Gemini.');
+  try {
+    return JSON.parse(limpio.slice(ini, fin + 1));
+  } catch {
+    throw new Error('La respuesta de Gemini no es JSON válido.');
+  }
+}
 
 const EXTRACT_PROMPT = `Sos un asistente especializado en lectura de documentos comerciales argentinos (facturas, presupuestos, cotizaciones, remitos, órdenes de compra).
 
@@ -84,89 +226,80 @@ Reglas generales:
 - "impuestos": incluir SOLO impuestos reales (IVA, percepciones). NO incluir Subtotal, Neto gravado ni TOTAL
 - Si el documento es completamente ilegible, devolvé items: [] e impuestos: []`;
 
-async function compressImageIfNeeded(file) {
-  const LIMIT = 4 * 1024 * 1024;
-  if (file.type === 'application/pdf' || file.size <= LIMIT) return file;
-
-  const img = await new Promise((resolve, reject) => {
-    const i   = new Image();
+function cargarImagen(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
     const url = URL.createObjectURL(file);
-    i.onload  = () => { URL.revokeObjectURL(url); resolve(i); };
-    i.onerror = () => { URL.revokeObjectURL(url); reject(new Error('No se pudo cargar la imagen para comprimir.')); };
-    i.src = url;
+    img.onload  = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('No se pudo cargar la imagen para comprimir.')); };
+    img.src = url;
   });
+}
+
+/*
+ * Las fotos de celular llegan de 6-12 MP: en base64 crecen otro 33% y el viaje
+ * a Gemini se va a decenas de segundos sin que el modelo lea nada mejor. Se
+ * bajan a 1800px de lado mayor, el mismo tamaño con el que ya entran las de
+ * Caja y Remitos por el escáner. Los PDF no se tocan.
+ */
+async function compressImageIfNeeded(file) {
+  const LIMIT    = 4 * 1024 * 1024;   // techo de lo que conviene mandar en inline_data
+  const MAX_DIM  = 1800;
+  const MIN_SIZE = 600 * 1024;        // más abajo de esto no hay nada que ganar
+
+  // Un archivo de cámara puede llegar sin `type`: la extensión decide, igual que al enviarlo.
+  if (!normalizeMimeType(file.type, file.name).startsWith('image/')) return file;
+  if (file.size <= MIN_SIZE) return file;
+
+  let img;
+  try {
+    img = await cargarImagen(file);
+  } catch (err) {
+    if (file.size > LIMIT) throw err;   // sin comprimir no entra: ahí sí es error
+    return file;                        // entra igual: seguimos con la original
+  }
 
   const canvas = document.createElement('canvas');
   const ctx    = canvas.getContext('2d');
-  let scale    = 0.7;
+  let scale    = Math.min(1, MAX_DIM / Math.max(img.naturalWidth, img.naturalHeight));
 
-  while (scale >= 0.1) {
-    canvas.width  = Math.round(img.naturalWidth  * scale);
-    canvas.height = Math.round(img.naturalHeight * scale);
+  for (let intento = 0; intento < 5; intento++) {
+    canvas.width  = Math.max(1, Math.round(img.naturalWidth  * scale));
+    canvas.height = Math.max(1, Math.round(img.naturalHeight * scale));
     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.88));
+
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.85));
     if (!blob) break;
-    if (blob.size <= LIMIT) {
-      return new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' });
-    }
-    scale *= 0.7;
+    if (blob.size > LIMIT) { scale *= 0.7; continue; }
+    // Una JPEG ya optimizada puede salir más pesada al re-comprimirla.
+    return blob.size < file.size
+      ? new File([blob], file.name.replace(/\.[^.]+$/, '.jpg'), { type: 'image/jpeg' })
+      : file;
   }
   return file;
 }
 
 async function extractFromFile(file) {
-  const apiKey = typeof GEMINI_API_KEY !== 'undefined' ? GEMINI_API_KEY : null;
-  if (!apiKey || apiKey === 'AQUI_VA_LA_KEY') {
-    throw new Error('No hay API Key configurada. Editá js/config.js con tu clave de Gemini.');
-  }
-
   file = await compressImageIfNeeded(file);
 
   const base64   = await fileToBase64(file);
   const mimeType = normalizeMimeType(file.type, file.name);
 
-  const body = {
+  const { data } = await callGemini(CADENA_DOC, {
     contents: [{
       parts: [
         { text: EXTRACT_PROMPT },
         { inline_data: { mime_type: mimeType, data: base64 } }
       ]
     }],
-    generationConfig: {
-      temperature: 0.05,
-      maxOutputTokens: 8192
-    }
-  };
+    generationConfig: { temperature: 0.05, maxOutputTokens: 8192 }
+  }, {
+    timeout:    60000,
+    msgTimeout: 'La solicitud a Gemini tardó demasiado. Intentá con una imagen más pequeña.',
+    msgVacio:   'Gemini no devolvió candidatos. Intentá con otra imagen o PDF.'
+  });
 
-  let response;
-  try {
-    response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
-      signal:  AbortSignal.timeout(60000)
-    });
-  } catch (err) {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
-      throw new Error('La solicitud a Gemini tardó demasiado. Intentá con una imagen más pequeña.');
-    }
-    throw err;
-  }
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    const msg = errData?.error?.message || `HTTP ${response.status}`;
-    throw new Error(`Error de API Gemini: ${msg}`);
-  }
-
-  const data = await response.json();
-
-  if (!data.candidates?.length) {
-    throw new Error('Gemini no devolvió candidatos. Intentá con otra imagen o PDF.');
-  }
-
-  const rawText = data.candidates[0]?.content?.parts?.[0]?.text || '';
-  return parseGeminiResponse(rawText);
+  return parseGeminiResponse(textoGemini(data));
 }
 
 function parseGeminiResponse(text) {
@@ -260,11 +393,6 @@ function fileToBase64(file) {
 // ---- Extracción básica (proveedor + total) para matching de OC ----
 
 async function extractBasicFromFile(file) {
-  const apiKey = typeof GEMINI_API_KEY !== 'undefined' ? GEMINI_API_KEY : null;
-  if (!apiKey || apiKey === 'AQUI_VA_LA_KEY') {
-    throw new Error('No hay API Key configurada.');
-  }
-
   file = await compressImageIfNeeded(file);
   const base64   = await fileToBase64(file);
   const mimeType = normalizeMimeType(file.type, file.name);
@@ -278,38 +406,15 @@ Regla para números: en documentos argentinos el punto es separador de miles y l
 Ejemplos: "1.250.000,50" → 1250000.5 · "52.314,51" → 52314.51
 Si no podés determinar un campo, usá null.`;
 
-  const body = {
+  const { data } = await callGemini(CADENA_DOC, {
     contents: [{ parts: [{ text: prompt }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
     generationConfig: { temperature: 0.05, maxOutputTokens: 256 }
-  };
+  }, {
+    timeout:    30000,
+    msgTimeout: 'Gemini tardó demasiado. Intentá con Asignar manualmente.'
+  });
 
-  let response;
-  try {
-    response = await fetch(`${GEMINI_LITE_ENDPOINT}?key=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(30000)
-    });
-  } catch (err) {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError') {
-      throw new Error('Gemini tardó demasiado. Intentá con Asignar manualmente.');
-    }
-    throw err;
-  }
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData?.error?.message || `HTTP ${response.status}`);
-  }
-
-  const data    = await response.json();
-  const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  let clean = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-  const s = clean.indexOf('{'), e = clean.lastIndexOf('}');
-  if (s === -1 || e === -1) throw new Error('Respuesta inesperada de Gemini.');
-
-  const parsed = JSON.parse(clean.slice(s, e + 1));
+  const parsed = jsonDeTexto(textoGemini(data));
   return {
     proveedor:       trimOrNull(parsed.proveedor),
     total_documento: parseFloatSafe(parsed.total) || null
@@ -334,43 +439,19 @@ Ejemplos: "1.250,50" → 1250.5 · "52.314,51" → 52314.51
 Si no podés determinar un campo, usá null. monto_total debe ser el importe final total.`;
 
 async function extractFromTicket(file) {
-  const apiKey = typeof GEMINI_API_KEY !== 'undefined' ? GEMINI_API_KEY : null;
-  if (!apiKey || apiKey === 'AQUI_VA_LA_KEY') throw new Error('No hay API Key configurada.');
-
   file = await compressImageIfNeeded(file);
   const base64   = await fileToBase64(file);
   const mimeType = normalizeMimeType(file.type, file.name);
 
-  const body = {
+  const { data } = await callGemini(CADENA_DOC, {
     contents: [{ parts: [{ text: TICKET_PROMPT }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
     generationConfig: { temperature: 0.05, maxOutputTokens: 512 }
-  };
+  }, {
+    timeout:    30000,
+    msgTimeout: 'Gemini tardó demasiado. Intentá de nuevo.'
+  });
 
-  let response;
-  try {
-    response = await fetch(`${GEMINI_LITE_ENDPOINT}?key=${apiKey}`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
-      signal:  AbortSignal.timeout(30000)
-    });
-  } catch (err) {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError') throw new Error('Gemini tardó demasiado. Intentá de nuevo.');
-    throw err;
-  }
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData?.error?.message || `HTTP ${response.status}`);
-  }
-
-  const data    = await response.json();
-  const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  let clean = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-  const s = clean.indexOf('{'), e = clean.lastIndexOf('}');
-  if (s === -1 || e === -1) throw new Error('Respuesta inesperada de Gemini.');
-
-  const parsed = JSON.parse(clean.slice(s, e + 1));
+  const parsed = jsonDeTexto(textoGemini(data));
   return {
     proveedor:          trimOrNull(parsed.proveedor),
     descripcion:        trimOrNull(parsed.descripcion),
@@ -426,48 +507,21 @@ Reglas:
 }
 
 async function extractFromRemito(file, ocItems) {
-  const apiKey = typeof GEMINI_API_KEY !== 'undefined' ? GEMINI_API_KEY : null;
-  if (!apiKey || apiKey === 'AQUI_VA_LA_KEY') throw new Error('No hay API Key configurada.');
-
   const items = Array.isArray(ocItems) ? ocItems : [];
 
   file = await compressImageIfNeeded(file);
   const base64   = await fileToBase64(file);
   const mimeType = normalizeMimeType(file.type, file.name);
 
-  const body = {
+  const { data } = await callGemini(CADENA_REMITO, {
     contents: [{ parts: [{ text: remitoPrompt(items) }, { inline_data: { mime_type: mimeType, data: base64 } }] }],
     generationConfig: { temperature: 0.05, maxOutputTokens: 8192 }
-  };
+  }, {
+    timeout:    60000,
+    msgTimeout: 'Gemini tardó demasiado. Cargá el remito a mano.'
+  });
 
-  let response;
-  try {
-    response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-      method:  'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify(body),
-      signal:  AbortSignal.timeout(60000)
-    });
-  } catch (err) {
-    if (err.name === 'TimeoutError' || err.name === 'AbortError')
-      throw new Error('Gemini tardó demasiado. Cargá el remito a mano.');
-    throw err;
-  }
-
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData?.error?.message || `HTTP ${response.status}`);
-  }
-
-  const data    = await response.json();
-  const rawText = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  let clean = rawText.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
-  const s = clean.indexOf('{'), e = clean.lastIndexOf('}');
-  if (s === -1 || e === -1) throw new Error('Respuesta inesperada de Gemini.');
-
-  let parsed;
-  try { parsed = JSON.parse(clean.slice(s, e + 1)); }
-  catch { throw new Error('La respuesta de Gemini no es JSON válido.'); }
+  const parsed = jsonDeTexto(textoGemini(data));
 
   // Un índice inventado escribiría una cantidad en el renglón equivocado, y un
   // índice repetido pisaría el anterior: se descartan los dos casos.
@@ -529,12 +583,7 @@ Reglas:
 - Si no hay ítems claros, devolvé items como []`;
 
 async function extractFromAudio(base64, mimeType) {
-  const apiKey = typeof GEMINI_API_KEY !== 'undefined' ? GEMINI_API_KEY : null;
-  if (!apiKey || apiKey === 'AQUI_VA_LA_KEY') {
-    throw new Error('No hay API Key configurada. Editá js/config.js con tu clave de Gemini.');
-  }
-
-  const body = {
+  const { data } = await callGemini(CADENA_AUDIO, {
     contents: [{
       parts: [
         { text: VOICE_PROMPT },
@@ -542,27 +591,13 @@ async function extractFromAudio(base64, mimeType) {
       ]
     }],
     generationConfig: { temperature: 0.05, maxOutputTokens: 2048 }
-  };
-
-  const response = await fetch(`${GEMINI_ENDPOINT}?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body)
+  }, {
+    timeout:    60000,
+    msgTimeout: 'Gemini tardó demasiado con el audio. Intentá de nuevo.',
+    msgVacio:   'Gemini no pudo procesar el audio. Intentá de nuevo.'
   });
 
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    const msg = errData?.error?.message || `HTTP ${response.status}`;
-    throw new Error(`Error de API Gemini: ${msg}`);
-  }
-
-  const data = await response.json();
-  if (!data.candidates?.length) {
-    throw new Error('Gemini no pudo procesar el audio. Intentá de nuevo.');
-  }
-
-  const rawText = data.candidates[0]?.content?.parts?.[0]?.text || '';
-  return parseVoiceResponse(rawText);
+  return parseVoiceResponse(textoGemini(data));
 }
 
 function parseVoiceResponse(text) {
