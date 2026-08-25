@@ -150,19 +150,22 @@
       document.getElementById('menu-card-reportes').style.display = '';
     }
 
-    // Autorizaciones: visible si tengo OC para firmar (me las pidieron) o si yo
-    // pedí autorización de alguna. El globito cuenta lo accionable: pendientes de
-    // mi firma + pedidos míos ya resueltos (aprobados/rechazados) que no vi.
+    // Autorizaciones: visible si tengo OC para firmar (me las pidieron), si yo
+    // pedí autorización de alguna, o si ya autoricé/rechacé alguna (para poder
+    // volver a la pestaña "Autorizadas"). El globito cuenta lo accionable:
+    // pendientes de mi firma + pedidos míos ya resueltos que no vi.
     if (typeof getAutorizacionesPendientes === 'function' && typeof getMisSolicitudes === 'function') {
       Promise.all([
         getAutorizacionesPendientes(_s.codigo).catch(() => []),
-        getMisSolicitudes(_s.codigo).catch(() => [])
-      ]).then(([paraFirmar, misPedidos]) => {
+        getMisSolicitudes(_s.codigo).catch(() => []),
+        (typeof getAutorizacionesResueltas === 'function'
+          ? getAutorizacionesResueltas(_s.codigo) : Promise.resolve([])).catch(() => [])
+      ]).then(([paraFirmar, misPedidos, yaResueltas]) => {
         let seen = [];
         try { seen = JSON.parse(localStorage.getItem('vimeco_solicitudes_vistas_' + _s.codigo) || '[]'); } catch (_) {}
         const resueltasSinVer = misPedidos.filter(oc =>
           (oc.estado === 'autorizada' || oc.estado === 'rechazada') && !seen.includes(oc._key)).length;
-        if (paraFirmar.length || misPedidos.length) {
+        if (paraFirmar.length || misPedidos.length || yaResueltas.length) {
           document.getElementById('menu-card-autorizaciones').style.display = '';
         }
         const n = paraFirmar.length + resueltasSinVer;
