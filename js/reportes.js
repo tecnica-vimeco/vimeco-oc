@@ -878,6 +878,7 @@ function openOCDetail(key) {
     <div class="foc-grid">
       ${fichaRow('Fecha', oc.fecha)}
       ${fichaRow('Obra', oc.obra)}
+      ${fichaRow('Rubro', oc.rubro?.nombre)}
       ${fichaRow('Proveedor', prov.nombre)}
       ${fichaRow('CUIT', prov.cuit)}
       ${fichaRow('Cond. IVA', prov.condicionIVA)}

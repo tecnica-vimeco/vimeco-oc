@@ -102,6 +102,7 @@
         ref:         clean(prov.ref)
       },
       obra:           prov.ubicacion,
+      rubro:          ocData.rubro  || null,
       equipo:         ocData.equipo || null,
       moneda:         ocData.moneda || 'ARS',
       condicionPago:  clean(prov.pago),
@@ -293,6 +294,17 @@
 (function () {
   const _base = () => FIREBASE_CONFIG.databaseURL;
 
+  // Rubros de una obra: del objeto crudo `/obras/{k}/rubros` a una lista
+  // ordenada [{ id, nombre, orden }]. Un rubro borrado desaparece de acá pero
+  // sigue nombrado en las OC que ya lo usaron (guardan el nombre, no sólo el id).
+  window.rubrosList = function (rubros) {
+    if (!rubros) return [];
+    return Object.entries(rubros)
+      .filter(([, r]) => r && r.nombre)
+      .map(([id, r]) => ({ id, nombre: r.nombre, orden: r.orden ?? 0 }))
+      .sort((a, b) => (a.orden - b.orden) || a.nombre.localeCompare(b.nombre));
+  };
+
   window.getObrasActivas = async function () {
     const resp = await fetch(_base() + '/obras.json');
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -300,7 +312,13 @@
     if (!data) return [];
     return Object.entries(data)
       .filter(([, o]) => o && o.nombre && o.activa)
-      .map(([key, o]) => ({ key, nombre: o.nombre, lugar_entrega: o.lugar_entrega || '' }))
+      .map(([key, o]) => ({
+        key,
+        nombre:         o.nombre,
+        lugar_entrega:  o.lugar_entrega || '',
+        rubros:         window.rubrosList(o.rubros),
+        rubrosCerrados: !!o.rubrosCerrados
+      }))
       .sort((a, b) => a.nombre.localeCompare(b.nombre));
   };
 

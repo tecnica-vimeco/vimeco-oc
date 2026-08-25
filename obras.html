@@ -54,6 +54,21 @@
       </div>
 
       <hr style="border:none;border-top:1px solid var(--gray-200);margin:1rem 0 .75rem;">
+      <div style="display:flex;align-items:center;gap:.5rem;margin:0 0 .35rem;">
+        <p style="font-weight:600;color:var(--gray-700);margin:0;">Rubros</p>
+        <span class="u-badge" id="obra-rubros-estado">Lista abierta</span>
+      </div>
+      <p style="font-size:.78rem;color:var(--gray-500);margin:0 0 .5rem;">
+        Mientras la lista esté abierta, las OC de esta obra no piden rubro.
+      </p>
+      <div style="display:flex;gap:.5rem;margin-bottom:.5rem;">
+        <input type="text" id="rubro-nuevo" class="form-control" placeholder="Ej: Instalación eléctrica">
+        <button class="btn btn-secondary" id="btn-add-rubro" type="button">Agregar</button>
+      </div>
+      <div id="obra-rubros-list" style="display:flex;flex-direction:column;gap:.4rem;max-height:200px;overflow-y:auto;"></div>
+      <button class="btn btn-outline btn-sm" id="btn-toggle-rubros" type="button" style="margin-top:.5rem;">Cerrar lista</button>
+
+      <hr style="border:none;border-top:1px solid var(--gray-200);margin:1rem 0 .75rem;">
       <p style="font-weight:600;color:var(--gray-700);margin:0 0 .5rem;">Personal</p>
 
       <div style="display:flex;gap:.75rem;">

@@ -116,6 +116,7 @@ async function ocDataDe(oc) {
       ref:       prov.ref          || '',
       ubicacion: oc.obra           || ''
     },
+    rubro:  oc.rubro  || null,
     equipo: oc.equipo || null,
     items: (oc.items || []).map(it => ({
       desc: it.desc || '', unidad: it.unidad || '', cant: it.cant || 0,

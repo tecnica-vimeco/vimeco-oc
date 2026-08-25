@@ -172,6 +172,7 @@ async function regenerarPDF(oc, btn) {
         ref:       prov.ref          || '',
         ubicacion: oc.obra           || ''
       },
+      rubro:       oc.rubro  || null,
       equipo:      oc.equipo || null,
       items: (oc.items || []).map(it => ({
         desc:    it.desc    || '',

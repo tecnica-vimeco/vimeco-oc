@@ -273,8 +273,13 @@ function drawProveedorTable(doc, data, y) {
 
   // Fila 4: Ubicación / Motivo — alto variable según contenido.
   // La etiqueta "Obra / Motivo:" entra en una línea (col izquierda ensanchada).
+  // El rubro (si la obra tiene la lista cerrada) se muestra junto a la obra:
+  // "Edificio San Martín — Instalación eléctrica". El dato guardado no se muta
+  // (sigue en data.rubro y en el `obra` del historial), se compone acá.
   const ubicW     = PROV_COLS[1] + PROV_COLS[2] + PROV_COLS[3];
-  const ubicLines = doc.splitTextToSize(p.ubicacion || '—', ubicW - 3);
+  const rubroTxt  = (data.rubro && data.rubro.nombre || '').trim();
+  const ubicTxt   = (p.ubicacion || '—') + (rubroTxt ? ` — ${rubroTxt}` : '');
+  const ubicLines = doc.splitTextToSize(ubicTxt, ubicW - 3);
   const R4H       = Math.max(MIN_H, ubicLines.length * LINE_H + 5);
   const ty4       = ubicLines.length === 1 ? ry + R4H / 2 + 1.5 : ry + 4.5;
 

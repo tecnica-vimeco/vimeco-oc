@@ -173,6 +173,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   setupFirmaModalButtons();
   setupImportButtons();
   setupObraCombo();
+  setupRubroCombo();
   setupEquipoCombo();
   setupProveedorCombo();
   setupOCNumberEdit();
@@ -541,6 +542,7 @@ function buscarObra(nombre) {
 function setObraValue(nombre) {
   const obra = buscarObra(nombre);
   $('obra').value = obra ? obra.nombre : '';
+  syncRubroCombo();
   return !!obra;
 }
 
@@ -564,6 +566,7 @@ async function setupObraCombo() {
   function selectObra(obra) {
     input.value = obra.nombre;
     dropdown.classList.add('hidden');
+    syncRubroCombo();
     const lugarInput = $('lugar-entrega');
     if (obra.lugar_entrega && (!lugarInput.value.trim() || lugarInput.dataset.autoFilled === '1')) {
       lugarInput.value = obra.lugar_entrega;
@@ -608,6 +611,73 @@ async function setupObraCombo() {
     delete $('lugar-entrega').dataset.autoFilled;
   });
 
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.combo-wrap')) dropdown.classList.add('hidden');
+  });
+}
+
+// ---- Rubro de la obra ----
+// Rubro elegido para esta OC: { id, nombre } o null. Sólo se pide cuando la
+// obra tiene la lista de rubros cerrada en Administración; mientras la lista
+// esté abierta el campo ni aparece y la OC sale sin rubro (como antes de v182).
+let selectedRubro = null;
+
+// Rubros elegibles de la obra que esté cargada en el campo Obra.
+// [] si no hay obra, si su lista está abierta o si no tiene rubros.
+function rubrosDeObraActual() {
+  const obra = buscarObra($('obra').value);
+  if (!obra || !obra.rubrosCerrados) return [];
+  return obra.rubros || [];
+}
+
+function setRubro(r) {
+  selectedRubro = r ? { id: r.id, nombre: r.nombre } : null;
+  const input = $('rubro');
+  if (input) input.value = selectedRubro ? selectedRubro.nombre : '';
+}
+
+// Muestra/oculta el campo según la obra cargada y descarta un rubro que no
+// pertenezca a ella (pasa al cambiar de obra o al usar una OC vieja de base).
+function syncRubroCombo() {
+  const group = $('rubro-group');
+  if (!group) return;
+  const rubros = rubrosDeObraActual();
+  group.classList.toggle('hidden', !rubros.length);
+  if (selectedRubro && !rubros.some(r => r.id === selectedRubro.id)) setRubro(null);
+}
+
+function setupRubroCombo() {
+  const input    = $('rubro');
+  const arrow    = $('rubro-arrow');
+  const dropdown = $('rubro-dropdown');
+  if (!input) return;
+
+  function buildOptions() {
+    dropdown.innerHTML = '';
+    rubrosDeObraActual().forEach(r => {
+      const div = document.createElement('div');
+      div.className = 'combo-option';
+      div.textContent = r.nombre;
+      div.addEventListener('mousedown', e => {
+        e.preventDefault(); setRubro(r); dropdown.classList.add('hidden');
+      });
+      dropdown.appendChild(div);
+    });
+  }
+
+  function toggleDropdown(e) {
+    e.stopPropagation();
+    if (!dropdown.classList.contains('hidden')) { dropdown.classList.add('hidden'); return; }
+    buildOptions();
+    if (dropdown.children.length) dropdown.classList.remove('hidden');
+  }
+
+  input.addEventListener('click', toggleDropdown);
+  arrow.addEventListener('click', toggleDropdown);
+  input.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown' || e.key === 'Enter' || e.key === ' ') toggleDropdown(e);
+    else if (e.key === 'Escape') dropdown.classList.add('hidden');
+  });
   document.addEventListener('click', e => {
     if (!e.target.closest('.combo-wrap')) dropdown.classList.add('hidden');
   });
@@ -1682,6 +1752,9 @@ function validateOCForm() {
   if (!condicionPago) { toast('Ingresá la condición de pago.', 'error'); revealAndFocus('condicion-pago'); return false; }
   if (!obra)          { toast('Elegí la obra / motivo de la lista.', 'error'); revealAndFocus('obra'); return false; }
   if (!buscarObra(obra)) { toast(`"${obra}" no está en el padrón de obras. Elegí una de la lista.`, 'error'); revealAndFocus('obra'); return false; }
+  if (rubrosDeObraActual().length && !selectedRubro) {
+    toast('Elegí el rubro de la obra.', 'error'); revealAndFocus('rubro'); return false;
+  }
   if (selectedEquipo && !selectedCategoria) {
     toast('Elegí la categoría de la compra del equipo (Repuestos o Mantenimiento).', 'error');
     $('equipo-cat-group').scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1742,6 +1815,10 @@ function buildOCData(numero, firma = null) {
       total:    roundCents((parseFloat(it.cantidad) || 0) * (parseFloat(it.precio_unitario) || 0))
     })),
     observaciones: $('observaciones').value.trim() || '',
+    // El rubro no se concatena a `ubicacion`: ese campo es el nombre de obra que
+    // termina nombrando la carpeta de Drive y el `obra` del historial. El PDF los
+    // junta al renderizar (igual que la categoría del equipo con Observaciones).
+    rubro:       selectedRubro ? { id: selectedRubro.id, nombre: selectedRubro.nombre } : null,
     equipo:      selectedEquipo ? { codigo: selectedEquipo.codigo, tipo: selectedEquipo.tipo, patente: selectedEquipo.patente || '', categoria: selectedCategoria || null } : null,
     impuestos:   pdfTotals,
     totalLetras: numberToWords(total),
@@ -2104,6 +2181,14 @@ function loadOCBase(oc) {
   // Una OC vieja puede traer un nombre de obra que ya no está en el padrón
   // (renombrada o unificada): en ese caso el campo queda vacío para reelegir.
   setObraValue(oc.obra);
+  // El rubro se recupera sólo si sigue vigente en esa obra (id o nombre: una OC
+  // vieja puede traer un rubro que después se quitó o se recargó con otro id).
+  const rubrosObra = rubrosDeObraActual();
+  const rubroPrev  = oc.rubro || null;
+  setRubro(rubroPrev
+    ? rubrosObra.find(r => r.id === rubroPrev.id) ||
+      rubrosObra.find(r => r.nombre === rubroPrev.nombre) || null
+    : null);
   setEquipo(oc.equipo || null);
   setCategoria(oc.equipo?.categoria || null);
   $('condicion-pago').value          = oc.condicionPago  || '';
@@ -2146,6 +2231,8 @@ function loadOCBase(oc) {
 function resetFormKeepProvider() {
   $('ref-presupuesto').value  = '';
   $('obra').value             = '';
+  setRubro(null);
+  syncRubroCombo();
   setEquipo(null);
   $('condicion-pago').value   = '';
   $('plazo-entrega').value    = '';
@@ -2181,6 +2268,8 @@ function resetForm() {
    'domicilio-proveedor','telefonos-proveedor',
    'ref-presupuesto','obra','condicion-pago','plazo-entrega','lugar-entrega','observaciones']
     .forEach(id => { $(id).value = ''; });
+  setRubro(null);
+  syncRubroCombo();
   setEquipo(null);
   _loadedProvCuit = null;
   $('condicion-iva-proveedor').value = 'Resp. Inscripto';

@@ -117,6 +117,15 @@
           <input type="text" id="condicion-pago" class="form-control" placeholder="Ej: Contado, 30 días, etc.">
         </div>
       </div>
+      <!-- Rubro: sólo visible si la obra elegida tiene la lista de rubros cerrada -->
+      <div class="form-group hidden" id="rubro-group">
+        <label for="rubro">Rubro*</label>
+        <div class="combo-wrap">
+          <input type="text" id="rubro" class="form-control combo-input combo-locked" placeholder="Elegí el rubro de la obra" readonly>
+          <button type="button" class="combo-arrow" id="rubro-arrow" tabindex="-1" aria-label="Ver rubros"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="4" x2="12" y2="16"/><polyline points="7 12 12 17 17 12"/></svg></button>
+          <div class="combo-dropdown hidden" id="rubro-dropdown"></div>
+        </div>
+      </div>
       <div class="form-group">
         <label for="equipo">Equipo (opcional)</label>
         <div class="combo-wrap">
