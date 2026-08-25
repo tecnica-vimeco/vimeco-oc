@@ -18,9 +18,9 @@
     .aut-total { font-weight:700; color:var(--gray-800); }
     .aut-actions { display:flex; flex-wrap:wrap; gap:.4rem; margin-top:.75rem; }
     .aut-bottom { display:flex; justify-content:space-between; align-items:center; margin-top:.5rem; }
-    /* Tabs: Para firmar / Mis pedidos */
+    /* Tabs: Para firmar / Mis pedidos / Autorizadas */
     .aut-tabs { display:flex; gap:.5rem; margin-bottom:.9rem; }
-    .aut-tab { flex:1; padding:.6rem .5rem; font-size:.9rem; font-weight:600;
+    .aut-tab { flex:1; padding:.6rem .4rem; font-size:.86rem; font-weight:600;
       border:1px solid var(--gray-300); border-radius:var(--radius); background:var(--white);
       color:var(--gray-600); cursor:pointer; display:inline-flex; align-items:center; justify-content:center; gap:.4rem; }
     .aut-tab.active { background:var(--primary); border-color:var(--primary); color:#fff; }
@@ -57,6 +57,7 @@
     <div class="aut-tabs">
       <button class="aut-tab active" id="tab-firmar" data-tab="firmar">Para firmar <span class="aut-tab-n hidden" id="n-firmar"></span></button>
       <button class="aut-tab" id="tab-pedidos" data-tab="pedidos">Mis pedidos <span class="aut-tab-n hidden" id="n-pedidos"></span></button>
+      <button class="aut-tab" id="tab-resueltas" data-tab="resueltas">Autorizadas</button>
     </div>
 
     <div id="pane-firmar">
@@ -75,6 +76,16 @@
         <span class="hist-count" id="ped-count"></span>
       </div>
       <div id="ped-list" class="hist-list">
+        <div class="hist-loading">Cargando…</div>
+      </div>
+    </div>
+
+    <div id="pane-resueltas" class="hidden">
+      <div class="hist-toolbar">
+        <span class="card-title">OC que resolviste</span>
+        <span class="hist-count" id="res-count"></span>
+      </div>
+      <div id="res-list" class="hist-list">
         <div class="hist-loading">Cargando…</div>
       </div>
     </div>

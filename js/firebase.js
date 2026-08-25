@@ -237,14 +237,26 @@
   // Para elegir autorizador se usa getUsuariosActivos(): cualquier usuario
   // activo puede autorizar (si no tiene firma, la dibuja en el momento).
 
+  // El historial completo se pide una sola vez para las tres bandejas de esta
+  // pantalla (pendientes / mis pedidos / resueltas por mí).
+  let _histCache = null;
+  async function _historialEntries() {
+    if (_histCache) return _histCache;
+    _histCache = (async () => {
+      const resp = await fetch(_base() + '/historial.json');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const data = await resp.json();
+      if (!data) return [];
+      return Object.entries(data).map(([key, oc]) => ({ _key: key, ...oc })).filter(Boolean);
+    })();
+    _histCache.catch(() => { _histCache = null; });
+    setTimeout(() => { _histCache = null; }, 10000);
+    return _histCache;
+  }
+
   // OC en estado 'pendiente' cuya autorización fue solicitada al usuario dado.
   window.getAutorizacionesPendientes = async function (codigo) {
-    const resp = await fetch(_base() + '/historial.json');
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    if (!data) return [];
-    return Object.entries(data)
-      .map(([key, oc]) => ({ _key: key, ...oc }))
+    return (await _historialEntries())
       .filter(oc => oc && oc.estado === 'pendiente' &&
                     oc.autorizacion && oc.autorizacion.solicitadoA &&
                     oc.autorizacion.solicitadoA.codigo === codigo)
@@ -254,16 +266,26 @@
   // Espejo de la anterior, del lado del solicitante: OC cuya autorización pedí YO
   // (cualquier estado: pendiente / autorizada / rechazada), para ver en qué quedó.
   window.getMisSolicitudes = async function (codigo) {
-    const resp = await fetch(_base() + '/historial.json');
-    if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    const data = await resp.json();
-    if (!data) return [];
-    return Object.entries(data)
-      .map(([key, oc]) => ({ _key: key, ...oc }))
+    return (await _historialEntries())
       .filter(oc => oc && oc.autorizacion && oc.autorizacion.solicitadoPor &&
                     oc.autorizacion.solicitadoPor.codigo === codigo)
       .sort((a, b) => (b.autorizacion.solicitadoEn || b.timestamp || 0) -
                       (a.autorizacion.solicitadoEn || a.timestamp || 0));
+  };
+
+  // OC que este usuario ya resolvió: las que firmó (estado 'autorizada') y las
+  // que rechazó. El rechazo no guarda quién lo hizo, así que también se toman
+  // las que le fueron dirigidas (solicitadoA).
+  window.getAutorizacionesResueltas = async function (codigo) {
+    return (await _historialEntries())
+      .filter(oc => {
+        if (!oc || !oc.autorizacion) return false;
+        if (oc.estado !== 'autorizada' && oc.estado !== 'rechazada') return false;
+        const a = oc.autorizacion;
+        return a.firmaCodigo === codigo || (a.solicitadoA && a.solicitadoA.codigo === codigo);
+      })
+      .sort((a, b) => (b.autorizacion.resueltoEn || b.timestamp || 0) -
+                      (a.autorizacion.resueltoEn || a.timestamp || 0));
   };
 })();
 

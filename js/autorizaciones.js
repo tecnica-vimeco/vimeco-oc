@@ -5,6 +5,7 @@ const $ = id => document.getElementById(id);
 
 let pendientes  = [];      // OC en estado 'pendiente' dirigidas a mí (para firmar)
 let misPedidos  = [];      // OC cuya autorización pedí yo (para ver el estado)
+let resueltas   = [];      // OC que ya autoricé o rechacé yo
 let myCode      = '';
 let myName      = '';
 let myFirma     = null;    // base64 de mi firma (o null si no tengo)
@@ -172,13 +173,63 @@ function renderPedidos() {
   });
 }
 
+// ---- "Autorizadas": OC que YA resolví (firmé o rechacé) ----
+function renderResueltas() {
+  const list = $('res-list');
+  const firmadas = resueltas.filter(oc => oc.estado === 'autorizada').length;
+  $('res-count').textContent = firmadas
+    ? `${firmadas} autorizada${firmadas !== 1 ? 's' : ''}` : '';
+
+  if (!resueltas.length) {
+    list.innerHTML = '<div class="hist-empty">Todavía no autorizaste ninguna OC.</div>';
+    return;
+  }
+
+  list.innerHTML = '';
+  resueltas.forEach(oc => {
+    const [cls, txt] = estadoPedido(oc);
+    const a       = oc.autorizacion || {};
+    const total   = oc.total != null ? `$ ${fmtMoney(oc.total)}` : '—';
+    const quien   = a.solicitadoPor?.nombre || oc.responsable?.nombre || '—';
+    const cuando  = a.resueltoEn ? new Date(a.resueltoEn).toLocaleDateString('es-AR') : (oc.fecha || '');
+    let extra = '';
+    if (oc.estado === 'rechazada' && a.motivoRechazo) {
+      extra = `<div class="aut-motivo">Motivo: ${esc(a.motivoRechazo)}</div>`;
+    }
+    const card = document.createElement('div');
+    card.className = 'hist-card';
+    card.innerHTML = `
+      <div class="aut-card-top">
+        <span class="aut-nro">${esc(oc.nroOC)}</span>
+        <span class="aut-estado aut-estado-${cls}">${txt}</span>
+      </div>
+      <div class="aut-prov">${esc(oc.proveedor?.nombre || '—')}</div>
+      <div class="aut-obra">${esc(oc.obra || '—')}</div>
+      <div class="aut-bottom">
+        <span class="aut-total">${total}</span>
+        <span class="aut-meta">Pidió: ${esc(quien)}${cuando ? ' · ' + esc(cuando) : ''}</span>
+      </div>
+      ${extra}
+      <div class="aut-actions">
+        <button class="btn btn-sm btn-outline btn-ver">Ver PDF</button>
+      </div>`;
+    card.querySelector('.btn-ver').addEventListener('click', () => abrirPreview(oc, true));
+    list.appendChild(card);
+  });
+}
+
+// Al resolver una OC pasa de "Para firmar" a "Autorizadas" sin recargar.
+function agregarAResueltas(oc, estado, aut) {
+  resueltas.unshift({ ...oc, estado, autorizacion: aut });
+  renderResueltas();
+}
+
 // ---- Tabs ----
 function showTab(tab) {
-  const firmar = tab === 'firmar';
-  $('pane-firmar').classList.toggle('hidden', !firmar);
-  $('pane-pedidos').classList.toggle('hidden', firmar);
-  $('tab-firmar').classList.toggle('active', firmar);
-  $('tab-pedidos').classList.toggle('active', !firmar);
+  ['firmar', 'pedidos', 'resueltas'].forEach(t => {
+    $('pane-' + t).classList.toggle('hidden', t !== tab);
+    $('tab-' + t).classList.toggle('active', t === tab);
+  });
 }
 
 function setTabCounts(sinVer) {
@@ -190,8 +241,8 @@ function setTabCounts(sinVer) {
 }
 
 // ---- Vista previa ----
-function abrirPreview(oc) {
-  currentOC = oc;
+function abrirPreview(oc, soloLectura) {
+  currentOC = soloLectura ? null : oc;
   let blob;
   try {
     blob = generateOCBlob(ocDataFromRecord(oc));
@@ -225,6 +276,10 @@ function abrirPreview(oc) {
   const fuente = $('preview-fuente');
   if (oc.fuenteUrl) { fuente.href = oc.fuenteUrl; fuente.classList.remove('hidden'); }
   else { fuente.classList.add('hidden'); }
+
+  // Las ya resueltas se abren solo para mirarlas.
+  $('preview-firmar').classList.toggle('hidden', !!soloLectura);
+  $('preview-rechazar').classList.toggle('hidden', !!soloLectura);
 
   modal.dataset.blobUrl = blobUrl;
   modal.classList.remove('hidden');
@@ -307,6 +362,7 @@ async function firmarOC(oc) {
   }
 
   quitarDeLista(oc);
+  agregarAResueltas(oc, 'autorizada', nuevaAut);
   cerrarPreview();
   if (btn) { btn.disabled = false; btn.innerHTML = '<svg class="icon" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> Firmar y autorizar'; }
   toast(`OC ${oc.nroOC} autorizada.`, 'success');
@@ -333,6 +389,7 @@ async function rechazarOC(oc, motivo) {
     return;
   }
   quitarDeLista(oc);
+  agregarAResueltas(oc, 'rechazada', nuevaAut);
   cerrarRechazo();
   cerrarPreview();
   toast(`OC ${oc.nroOC} rechazada.`, 'info');
@@ -434,15 +491,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Tabs
   $('tab-firmar').addEventListener('click', () => showTab('firmar'));
   $('tab-pedidos').addEventListener('click', () => showTab('pedidos'));
+  $('tab-resueltas').addEventListener('click', () => showTab('resueltas'));
 
   // Mi firma (para autorizar sin volver a dibujarla)
   getFirma(myCode).then(f => { myFirma = f || null; }).catch(() => {});
 
   // Cargar ambas bandejas: lo que me piden firmar y lo que yo pedí.
   try {
-    [pendientes, misPedidos] = await Promise.all([
+    [pendientes, misPedidos, resueltas] = await Promise.all([
       getAutorizacionesPendientes(myCode),
-      (typeof getMisSolicitudes === 'function' ? getMisSolicitudes(myCode) : Promise.resolve([])).catch(() => [])
+      (typeof getMisSolicitudes === 'function' ? getMisSolicitudes(myCode) : Promise.resolve([])).catch(() => []),
+      (typeof getAutorizacionesResueltas === 'function' ? getAutorizacionesResueltas(myCode) : Promise.resolve([])).catch(() => [])
     ]);
   } catch (e) {
     $('aut-list').innerHTML = '<div class="hist-empty">No se pudieron cargar las autorizaciones. Revisá tu conexión.</div>';
@@ -453,6 +512,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const sinVer = pedidosSinVer();   // antes de marcarlos vistos
   render();
   renderPedidos();
+  renderResueltas();
   setTabCounts(sinVer);
   // Abre en la pestaña con algo para hacer: firmar si tengo pendientes, si no mis pedidos.
   showTab(pendientes.length ? 'firmar' : (misPedidos.length ? 'pedidos' : 'firmar'));
