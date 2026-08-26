@@ -1,6 +1,23 @@
 /* global FIREBASE_CONFIG */
 /* Firebase RTDB — REST API con optimistic locking (sin SDK) */
 
+/* Las escrituras que la pantalla espera llevan tope de tiempo: un fetch sin
+   AbortController puede quedar pendiente para siempre (la pestaña suspendida al
+   bloquear el celular, la red caída sin cerrar el socket) y dejar un botón
+   girando sin error ni resultado. Con el tope, el cuelgue se vuelve un error que
+   quien llama ya sabe mostrar. Las lecturas de fondo siguen sin tope: si tardan,
+   no hay nadie esperándolas. */
+window._fetchConTope = function (url, opts, ms = 20000) {
+  const ctrl = new AbortController();
+  const to   = setTimeout(() => ctrl.abort(), ms);
+  return fetch(url, { ...(opts || {}), signal: ctrl.signal })
+    .catch(err => {
+      if (err && err.name === 'AbortError') throw new Error(`Sin respuesta tras ${Math.round(ms / 1000)}s`);
+      throw err;
+    })
+    .finally(() => clearTimeout(to));
+};
+
 (function () {
   const _SEED = 2059; // first claim → 2060
 
@@ -204,7 +221,7 @@
   };
 
   window.saveFirma = async function (codigo, base64) {
-    const resp = await fetch(_base() + '/firmas/' + codigo + '.json', {
+    const resp = await _fetchConTope(_base() + '/firmas/' + codigo + '.json', {
       method:  'PUT',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(base64)
@@ -352,7 +369,7 @@
   };
 
   window.patchHistorialEntry = async function (key, fields) {
-    const resp = await fetch(_base() + '/historial/' + key + '.json', {
+    const resp = await _fetchConTope(_base() + '/historial/' + key + '.json', {
       method:  'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(fields)

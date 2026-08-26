@@ -16,6 +16,34 @@
 
   const TOKEN_URL = 'https://oauth2.googleapis.com/token';
 
+  // Ningún fetch contra Drive tenía tope de tiempo. Si la respuesta no llegaba
+  // nunca —la pestaña suspendida al bloquear el celular, una red que se cae sin
+  // cerrar el socket— el await quedaba pendiente para siempre: sin error, sin
+  // catch y sin log. Así la OC 0000-00000323 quedó con el botón "Autorizando…"
+  // puesto y el estado sin cambiar. Con el tope, un cuelgue se vuelve un error
+  // normal y quien llama ya sabe qué hacer con eso.
+  //
+  // Este `fetch` tapa al global dentro del módulo: vale para todas las llamadas
+  // del archivo. Las subidas llevan más margen que las consultas (un PDF por
+  // datos móviles tarda), y abortar una no duplica nada porque uploadFile mira
+  // si el archivo ya llegó antes de reintentar.
+  const _FETCH_TIMEOUT    = 30000;
+  const _FETCH_TIMEOUT_UP = 120000;
+  const _nativeFetch      = window.fetch.bind(window);
+
+  function fetch(url, opts) {
+    const ms   = String(url).includes('/upload/') ? _FETCH_TIMEOUT_UP : _FETCH_TIMEOUT;
+    const ctrl = new AbortController();
+    const to   = setTimeout(() => ctrl.abort(), ms);
+    return _nativeFetch(url, { ...(opts || {}), signal: ctrl.signal })
+      .catch(err => {
+        if (err && err.name === 'AbortError')
+          throw new Error(`Sin respuesta tras ${Math.round(ms / 1000)}s`);
+        throw err;
+      })
+      .finally(() => clearTimeout(to));
+  }
+
   async function getAccessToken() {
     const cached = sessionStorage.getItem('_dtok');
     const expiry = parseInt(sessionStorage.getItem('_dexp') || '0', 10);

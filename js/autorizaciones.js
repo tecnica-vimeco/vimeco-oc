@@ -296,78 +296,94 @@ function cerrarPreview() {
 }
 
 // ---- Firmar y autorizar ----
+// El estado se registra ANTES de subir el PDF. Firmar es el acto; archivarlo en
+// Drive es el respaldo, y Novedades sabe resubir lo que quedó sin archivar. Con
+// el orden al revés, cualquier demora de Drive se llevaba puesta la autorización
+// entera: la firma estaba hecha, el botón seguía girando y la OC figuraba
+// pendiente (le pasó a la 0000-00000323).
 async function firmarOC(oc) {
   if (!oc) return;
   if (!myFirma) { pendingSign = oc; openFirmaModal(); return; }
 
   const btn = $('preview-firmar');
+  if (btn && btn.disabled) return;   // ya hay una autorización en curso
+  const btnHtml = btn ? btn.innerHTML : '';
   if (btn) { btn.disabled = true; btn.innerHTML = '<span class="spinner"></span> Autorizando…'; }
 
-  const ocData = ocDataFromRecord(oc);
-  ocData._firma    = myFirma;   // firma del autorizador
-  ocData._firmante = myName;    // nombre del autorizador bajo la firma
-  // ocData.ejecutor queda igual = creador de la OC
-
-  let blob;
+  // El botón se repone pase lo que pase: si algo revienta después de arrancar,
+  // dejarlo con el spinner puesto simula un trabajo que ya no existe.
   try {
-    blob = generateOCBlob(ocData);
-  } catch (e) {
-    toast('Error al generar el PDF.', 'error');
-    console.error('firmarOC/pdf:', e);
-    if (btn) { btn.disabled = false; btn.innerHTML = 'Firmar y autorizar'; }
-    return;
+    const ocData = ocDataFromRecord(oc);
+    ocData._firma    = myFirma;   // firma del autorizador
+    ocData._firmante = myName;    // nombre del autorizador bajo la firma
+    // ocData.ejecutor queda igual = creador de la OC
+
+    let blob;
+    try {
+      blob = generateOCBlob(ocData);
+    } catch (e) {
+      toast('Error al generar el PDF.', 'error');
+      console.error('firmarOC/pdf:', e);
+      return;
+    }
+
+    const histKey  = oc.nroOC.replace(/-/g, '');
+    const nuevaAut = {
+      ...(oc.autorizacion || {}),
+      resueltoEn:  Date.now(),
+      firmaCodigo: myCode,
+      firmante:    myName,
+      motivoRechazo: null
+    };
+
+    try {
+      await patchHistorialEntry(histKey, { estado: 'autorizada', autorizacion: nuevaAut });
+    } catch (e) {
+      toast('No se pudo autorizar la OC. Revisá tu conexión.', 'error');
+      console.error('firmarOC/patch:', e);
+      return;
+    }
+
+    quitarDeLista(oc);
+    agregarAResueltas(oc, 'autorizada', nuevaAut);
+    cerrarPreview();
+    toast(`OC ${oc.nroOC} autorizada.`, 'success');
+
+    // Respaldo en Drive. Ya no condiciona la autorización, pero se espera igual
+    // para poder avisar si el PDF no quedó archivado.
+    const fname = `OC_${oc.nroOC}_${sanitizeStr(ocData.proveedor.nombre || 'SinProveedor')}.pdf`;
+    const meta  = {
+      obra:      oc.obra || ocData.proveedor.ubicacion || 'Sin obra',
+      fecha:     (oc.timestamp ? new Date(oc.timestamp) : new Date()).toISOString().slice(0, 10),
+      proveedor: ocData.proveedor.nombre || 'Sin proveedor',
+      nroOC:     oc.nroOC,
+      obrasFolderId:       oc.drive_folder_obras_id       || null,
+      proveedoresFolderId: oc.drive_folder_proveedores_id || null
+    };
+
+    let folderIds = {};
+    try {
+      if (typeof uploadPdfToDrive === 'function') folderIds = await uploadPdfToDrive(blob, fname, meta);
+    } catch (e) {
+      console.warn('uploadPdfToDrive:', e);
+      toast('OC autorizada, pero no se pudo subir el PDF a Drive.', 'warning');
+    }
+
+    const obrasId = folderIds.obrasFolderId       || oc.drive_folder_obras_id       || null;
+    const provId  = folderIds.proveedoresFolderId || oc.drive_folder_proveedores_id || null;
+    // Sólo si Drive devolvió carpetas: si no, el registro que ya tenía la OC vale.
+    if (folderIds.obrasFolderId || folderIds.proveedoresFolderId) {
+      patchHistorialEntry(histKey, {
+        drive_folder_obras_id:       obrasId,
+        drive_folder_proveedores_id: provId
+      }).catch(e => console.warn('firmarOC/carpetas:', e));
+    }
+
+    if (typeof logOCActivity === 'function')
+      logOCActivity(oc.nroOC, ocData.proveedor.nombre, oc.obra, oc.total, obrasId || provId);
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = btnHtml; }
   }
-
-  const fname = `OC_${oc.nroOC}_${sanitizeStr(ocData.proveedor.nombre || 'SinProveedor')}.pdf`;
-  const meta  = {
-    obra:      oc.obra || ocData.proveedor.ubicacion || 'Sin obra',
-    fecha:     (oc.timestamp ? new Date(oc.timestamp) : new Date()).toISOString().slice(0, 10),
-    proveedor: ocData.proveedor.nombre || 'Sin proveedor',
-    nroOC:     oc.nroOC,
-    obrasFolderId:       oc.drive_folder_obras_id       || null,
-    proveedoresFolderId: oc.drive_folder_proveedores_id || null
-  };
-
-  let folderIds = {};
-  try {
-    if (typeof uploadPdfToDrive === 'function') folderIds = await uploadPdfToDrive(blob, fname, meta);
-  } catch (e) {
-    console.warn('uploadPdfToDrive:', e);
-    toast('OC autorizada, pero no se pudo subir el PDF a Drive.', 'warning');
-  }
-
-  const nuevaAut = {
-    ...(oc.autorizacion || {}),
-    resueltoEn:  Date.now(),
-    firmaCodigo: myCode,
-    firmante:    myName,
-    motivoRechazo: null
-  };
-  try {
-    await patchHistorialEntry(oc.nroOC.replace(/-/g, ''), {
-      estado: 'autorizada',
-      autorizacion: nuevaAut,
-      drive_folder_obras_id:       folderIds.obrasFolderId       || oc.drive_folder_obras_id       || null,
-      drive_folder_proveedores_id: folderIds.proveedoresFolderId || oc.drive_folder_proveedores_id || null
-    });
-  } catch (e) {
-    toast('No se pudo actualizar el estado de la OC.', 'error');
-    console.error('firmarOC/patch:', e);
-    if (btn) { btn.disabled = false; btn.innerHTML = 'Firmar y autorizar'; }
-    return;
-  }
-
-  if (typeof logOCActivity === 'function') {
-    const folderId = folderIds.obrasFolderId || folderIds.proveedoresFolderId ||
-                      oc.drive_folder_obras_id || oc.drive_folder_proveedores_id;
-    logOCActivity(oc.nroOC, ocData.proveedor.nombre, oc.obra, oc.total, folderId);
-  }
-
-  quitarDeLista(oc);
-  agregarAResueltas(oc, 'autorizada', nuevaAut);
-  cerrarPreview();
-  if (btn) { btn.disabled = false; btn.innerHTML = '<svg class="icon" viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg> Firmar y autorizar'; }
-  toast(`OC ${oc.nroOC} autorizada.`, 'success');
 }
 
 // ---- Rechazar ----
@@ -495,8 +511,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('tab-pedidos').addEventListener('click', () => showTab('pedidos'));
   $('tab-resueltas').addEventListener('click', () => showTab('resueltas'));
 
-  // Mi firma (para autorizar sin volver a dibujarla)
-  getFirma(myCode).then(f => { myFirma = f || null; }).catch(() => {});
+  // Mi firma (para autorizar sin volver a dibujarla). Si la lectura tarda y
+  // mientras tanto el usuario dibujó la suya, no pisarla: con la conexión lenta
+  // esta respuesta llegaba después de guardarla y volvía a pedirla.
+  getFirma(myCode).then(f => { if (!myFirma) myFirma = f || null; }).catch(() => {});
 
   // Cargar ambas bandejas: lo que me piden firmar y lo que yo pedí.
   try {

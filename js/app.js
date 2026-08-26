@@ -188,7 +188,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   retryDriveQueue().catch(() => {});
   window.addEventListener('online', () => retryDriveQueue().catch(() => {}));
 
-  getFirma(code).then(f => { firmaBase64 = f || null; }).catch(() => {});
+  // Si la lectura tarda y el usuario dibujó su firma mientras tanto, no pisarla.
+  getFirma(code).then(f => { if (!firmaBase64) firmaBase64 = f || null; }).catch(() => {});
 
   const ocBaseRaw = sessionStorage.getItem('oc_base');
   if (ocBaseRaw) {
