@@ -40,20 +40,11 @@ function displayToISODate(d) {
 
 // ---- Estado de facturación de la OC ----
 
-// Qué se le cargó ya a esta OC, según `/historial/{key}/adjuntos`:
-//   'con'    → hay al menos un archivo cargado como factura
-//   'otros'  → hay archivos, pero ninguno rotulado factura. Son las cargas
-//              previas a v166, cuando la pantalla no distinguía qué se subía:
-//              no se puede afirmar ni que tiene ni que le falta.
-//   'sin'    → no hay ningún archivo registrado
+// Qué se le cargó ya a esta OC ('con' | 'otros' | 'sin'). El criterio vive en
+// firebase.js —junto al escritor del nodo `adjuntos`— porque también lo lee el
+// resumen del período en Reportes.
 function estadoFactura(oc) {
-  const lista = Object.values(oc.adjuntos || {}).filter(Boolean);
-  const facts = lista.filter(a => a.tipo === 'factura');
-  if (facts.length) {
-    const ult = facts.reduce((a, b) => ((b.ts || 0) > (a.ts || 0) ? b : a));
-    return { estado: 'con', n: lista.length, ts: ult.ts, por: ult.por };
-  }
-  return { estado: lista.length ? 'otros' : 'sin', n: lista.length };
+  return estadoFacturaOC(oc);
 }
 
 // dd/mm a mano: toLocaleDateString('es-AR') con 2-digit igual devuelve "10/8".

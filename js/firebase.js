@@ -389,6 +389,24 @@ window._fetchConTope = function (url, opts, ms = 20000) {
   // pedirle nada a Drive: el historial ya viene entero en getHistorial().
   // registro = { tipo:'factura'|'otro'|'desconocido', nombre, ts, por }
 
+  // Qué se le cargó ya a esta OC, leyendo ese mismo nodo:
+  //   'con'    → hay al menos un archivo cargado como factura
+  //   'otros'  → hay archivos, pero ninguno rotulado factura. Son las cargas
+  //              previas a v166, cuando la pantalla no distinguía qué se subía:
+  //              no se puede afirmar ni que tiene ni que le falta.
+  //   'sin'    → no hay ningún archivo registrado
+  // Vive acá —y no en facturas.js— porque lo leen dos pantallas (Facturas y el
+  // resumen de Reportes) y el criterio tiene que ser uno solo.
+  window.estadoFacturaOC = function (oc) {
+    const lista = Object.values((oc && oc.adjuntos) || {}).filter(Boolean);
+    const facts = lista.filter(a => a.tipo === 'factura');
+    if (facts.length) {
+      const ult = facts.reduce((a, b) => ((b.ts || 0) > (a.ts || 0) ? b : a));
+      return { estado: 'con', n: lista.length, ts: ult.ts, por: ult.por };
+    }
+    return { estado: lista.length ? 'otros' : 'sin', n: lista.length };
+  };
+
   window.registrarAdjuntoOC = async function (nroOC, registro) {
     const key  = String(nroOC).replace(/-/g, '');
     const resp = await fetch(_base() + '/historial/' + key + '/adjuntos.json', {

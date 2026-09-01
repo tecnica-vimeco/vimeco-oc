@@ -59,6 +59,7 @@ const STATIC_ASSETS = [
   BASE + '/js/autorizaciones.js',
   BASE + '/reportes.html',
   BASE + '/js/reportes.js',
+  BASE + '/js/resumenPDF.js',
   BASE + '/js/dolar.js'
 ];
 

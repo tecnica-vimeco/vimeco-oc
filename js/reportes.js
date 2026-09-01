@@ -32,6 +32,11 @@ const state = {
   moneda: 'ARS',       // moneda de visualización
   rate:   'oficial',   // 'oficial' | 'blue' — qué cotización usar para convertir
   incluirNoEmitidas: false,
+  // Resumen del período: preset activo ('semana'|'quincena'|'mes'|null) y
+  // cuántos períodos hacia atrás está parado. El preset ESCRIBE desde/hasta,
+  // así que todo el panel se mueve con él; tocar las fechas a mano lo apaga.
+  periodo:  null,
+  pOffset:  0,
 };
 
 const expanded = new Set(); // claves de filas desplegadas (por sección+key)
@@ -658,6 +663,370 @@ function renderHero(list) {
   return total;
 }
 
+// ===================================================
+//  Resumen del período
+// ===================================================
+// La foto de la semana / quincena / mes: totales, obras y proveedores del
+// período, y el listado de cada OC emitida con su estado de factura. Es lo
+// mismo que se ve en pantalla y lo que sale en el PDF —los dos leen de
+// resumenData()—, así que no pueden discrepar.
+//
+// Dos diferencias a propósito con el resto del panel:
+//   · nunca incluye pendientes ni rechazadas, aunque el checkbox de arriba las
+//     prenda: es lo que se compró, no lo que se pidió;
+//   · el importe de cada fila va en la moneda original de la OC. Sólo los
+//     totales se convierten a la moneda elegida arriba.
+
+const DIAS_FACTURA = 15;    // sin factura pasados estos días = a reclamar
+
+const MESES_LG = ['enero','febrero','marzo','abril','mayo','junio','julio',
+                  'agosto','septiembre','octubre','noviembre','diciembre'];
+
+function isoDe(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+function dmy(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}/${d.getFullYear()}`;
+}
+function dm(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  return `${String(d.getDate()).padStart(2, '0')}/${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+// Rango del preset `tipo` desplazado `off` períodos hacia atrás (0 = el actual).
+// La semana es lunes a domingo; la quincena, 1–15 y 16–fin de mes.
+function rangoPeriodo(tipo, off) {
+  const hoy = new Date(); hoy.setHours(0, 0, 0, 0);
+
+  if (tipo === 'semana') {
+    const ini = new Date(hoy);
+    ini.setDate(hoy.getDate() - ((hoy.getDay() + 6) % 7) - off * 7);
+    const fin = new Date(ini); fin.setDate(ini.getDate() + 6);
+    return { tipo, desde: isoDe(ini), hasta: isoDe(fin) };
+  }
+
+  if (tipo === 'quincena') {
+    // Índice continuo de medias-mes para poder restar sin casos especiales.
+    const idx = hoy.getFullYear() * 24 + hoy.getMonth() * 2 + (hoy.getDate() <= 15 ? 0 : 1) - off;
+    const y   = Math.floor(idx / 24);
+    const r   = idx - y * 24;
+    const m   = Math.floor(r / 2);
+    const q   = r % 2;
+    const ini = new Date(y, m, q ? 16 : 1);
+    const fin = q ? new Date(y, m + 1, 0) : new Date(y, m, 15);
+    return { tipo, desde: isoDe(ini), hasta: isoDe(fin) };
+  }
+
+  const ini = new Date(hoy.getFullYear(), hoy.getMonth() - off, 1);
+  const fin = new Date(hoy.getFullYear(), hoy.getMonth() - off + 1, 0);
+  return { tipo: 'mes', desde: isoDe(ini), hasta: isoDe(fin) };
+}
+
+function labelRango(r) {
+  if (!r || !r.desde || !r.hasta) return 'Todo el historial';
+  const [y1, m1, d1] = r.desde.split('-').map(Number);
+  const [y2, m2, d2] = r.hasta.split('-').map(Number);
+  if (r.tipo === 'mes')      return `${MESES_LG[m1 - 1]} de ${y1}`;
+  if (r.tipo === 'quincena') return `${d1 === 1 ? '1ª' : '2ª'} quincena de ${MESES_LG[m1 - 1]} de ${y1}`;
+  if (r.tipo === 'semana')   return `Semana del ${d1}/${m1} al ${d2}/${m2} de ${y2}`;
+  return `${String(d1).padStart(2, '0')}/${String(m1).padStart(2, '0')}/${y1} – ${String(d2).padStart(2, '0')}/${String(m2).padStart(2, '0')}/${y2}`;
+}
+
+// El rango actual del resumen: el del preset si hay uno, y si no las fechas
+// que el usuario haya puesto a mano (o todo el historial si no puso ninguna).
+function rangoActual() {
+  if (state.periodo) return rangoPeriodo(state.periodo, state.pOffset);
+  return { tipo: null, desde: state.desde, hasta: state.hasta };
+}
+
+// Con qué se compara. Con preset, el período inmediatamente anterior; con
+// fechas a mano, la ventana del mismo largo que termina el día previo.
+function rangoAnterior(r) {
+  if (state.periodo) return rangoPeriodo(state.periodo, state.pOffset + 1);
+  if (!r.desde || !r.hasta) return null;
+  const ini = new Date(r.desde + 'T00:00:00');
+  const fin = new Date(r.hasta + 'T00:00:00');
+  const dias = Math.round((fin - ini) / 86400000) + 1;
+  const pFin = new Date(ini); pFin.setDate(ini.getDate() - 1);
+  const pIni = new Date(pFin); pIni.setDate(pFin.getDate() - dias + 1);
+  return { tipo: null, desde: isoDe(pIni), hasta: isoDe(pFin) };
+}
+
+function esFirme(oc) {
+  const e = oc.estado || 'emitida';
+  return e !== 'pendiente' && e !== 'rechazada';
+}
+
+function ocsDeRango(r) {
+  return ALL
+    .filter(oc => {
+      if (!esFirme(oc)) return false;
+      const ts = oc.timestamp || 0;
+      if (r.desde && ts < new Date(r.desde + 'T00:00:00').getTime()) return false;
+      if (r.hasta && ts > new Date(r.hasta + 'T23:59:59').getTime()) return false;
+      return true;
+    })
+    .sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+}
+
+// Suma en la moneda de visualización, ignorando lo que no se pueda convertir.
+function sumaDe(list) {
+  let total = 0, noConv = 0;
+  list.forEach(oc => {
+    const amt = amountIn(oc, state.moneda);
+    if (amt == null) { noConv++; return; }
+    total += amt;
+  });
+  return { total, noConv };
+}
+
+// null = no hay período anterior contra el cual comparar; Infinity = lo hubo
+// pero sin compras (dividir por cero diría "+∞%", que no informa nada).
+function variacion(actual, previo) {
+  if (previo == null) return null;
+  if (!previo)        return actual ? Infinity : 0;
+  return ((actual - previo) / previo) * 100;
+}
+function fmtVar(v, unidad) {
+  if (v == null)   return `sin ${unidad} anterior para comparar`;
+  if (!isFinite(v)) return `la ${unidad} anterior no tuvo compras`;
+  const s = v >= 0 ? '+' : '−';
+  return `${s}${Math.abs(v).toLocaleString('es-AR', { maximumFractionDigits: 1 })}% vs. ${unidad} anterior`;
+}
+
+// Todo lo que necesitan la card y el PDF, calculado una sola vez.
+function resumenData() {
+  const r     = rangoActual();
+  const prevR = rangoAnterior(r);
+  const list  = ocsDeRango(r);
+
+  const { total, noConv } = sumaDe(list);
+  const prev = prevR ? ocsDeRango(prevR) : [];
+  const prevSuma = prevR ? sumaDe(prev).total : null;
+
+  // Estado de factura. "Vencida" se mide contra hoy, no contra el fin del
+  // período: la pregunta es qué falta reclamar ahora.
+  const corte = Date.now() - DIAS_FACTURA * 86400000;
+  const fact  = { con: 0, otros: 0, mCon: 0, mSin: 0, venc: 0, mVenc: 0 };
+  const filas = list.map(oc => {
+    const f   = estadoFacturaOC(oc);
+    const amt = amountIn(oc, state.moneda) || 0;
+    const vencida = f.estado !== 'con' && (oc.timestamp || 0) < corte;
+    if (f.estado === 'con') { fact.con++; fact.mCon += amt; }
+    else                    { fact.mSin += amt; }          // incluye las 'sin rotular'
+    if (f.estado === 'otros') fact.otros++;
+    if (vencida)            { fact.venc++; fact.mVenc += amt; }
+    return { oc, f, vencida };
+  });
+
+  // El índice de proveedores es global (lo usan los rankings y el detector de
+  // duplicados): se arma sobre esta lista para agrupar bien acá y se restaura
+  // al terminar, para no dejarlo apuntando a un subconjunto.
+  buildProvIndex(list);
+  const topProv = groupAgg(list, provKey, provLabel).slice(0, 5);
+  const topObras = groupAgg(list, oc => oc.obra || '—', oc => oc.obra || 'Sin obra').slice(0, 5);
+  buildProvIndex(getFiltered());
+
+  const unidad = state.periodo === 'semana' ? 'semana'
+               : state.periodo === 'quincena' ? 'quincena'
+               : state.periodo === 'mes' ? 'mes' : 'período';
+
+  return { r, prevR, unidad, list, filas, total, noConv, prevSuma,
+           prevCount: prevR ? prev.length : null, fact, topObras, topProv };
+}
+
+function renderResumen() {
+  const d = resumenData();
+
+  $('res-rango').textContent = labelRango(d.r);
+  const nav = $('rep-res-nav');
+  if (nav) nav.classList.toggle('rr-nav-off', !state.periodo);
+  const next = $('per-next');
+  if (next) next.disabled = !state.periodo || state.pOffset <= 0;
+
+  const vT = variacion(d.total, d.prevSuma);
+  const vC = variacion(d.list.length, d.prevCount);
+
+  $('res-stats').innerHTML = `
+    <div class="rr-stat rr-stat--hero">
+      <span class="rr-k">Total del período</span>
+      <span class="rr-v">${fmtFull(d.total, state.moneda)}</span>
+      <span class="rr-d">${esc(fmtVar(vT, d.unidad))}</span>
+    </div>
+    <div class="rr-stat">
+      <span class="rr-k">OC emitidas</span>
+      <span class="rr-v">${d.list.length}</span>
+      <span class="rr-d">${esc(fmtVar(vC, d.unidad))}</span>
+    </div>
+    <div class="rr-stat rr-stat--ok">
+      <span class="rr-k">Con factura</span>
+      <span class="rr-v">${d.fact.con}</span>
+      <span class="rr-d">${fmtCompact(d.fact.mCon, state.moneda)}</span>
+    </div>
+    <div class="rr-stat rr-stat--no">
+      <span class="rr-k">Sin factura</span>
+      <span class="rr-v">${d.list.length - d.fact.con}</span>
+      <span class="rr-d">${fmtCompact(d.fact.mSin, state.moneda)}${d.fact.otros ? ` · ${d.fact.otros} sin rotular` : ''}</span>
+    </div>
+    <div class="rr-stat ${d.fact.venc ? 'rr-stat--warn' : ''}">
+      <span class="rr-k">Sin factura +${DIAS_FACTURA} días</span>
+      <span class="rr-v">${d.fact.venc}</span>
+      <span class="rr-d">${d.fact.venc ? fmtCompact(d.fact.mVenc, state.moneda) + ' a reclamar' : 'nada pendiente'}</span>
+    </div>`;
+
+  const mini = (titulo, rows) => `
+    <div class="rr-mini">
+      <div class="rr-mini-t">${titulo}</div>
+      ${rows.length ? rows.map(row => `
+        <div class="rr-mini-r">
+          <span class="rr-mini-l">${esc(row.label)}</span>
+          <span class="rr-mini-v">${fmtCompact(row.total, state.moneda)}</span>
+          <span class="rr-mini-p">${d.total ? Math.round((row.total / d.total) * 100) : 0}%</span>
+        </div>`).join('')
+      : '<div class="rep-empty">Sin datos en el período.</div>'}
+    </div>`;
+
+  $('res-tops').innerHTML = mini('Obras del período', d.topObras)
+                          + mini('Proveedores del período', d.topProv);
+
+  $('res-list').innerHTML = d.filas.length ? `
+    <table class="rr-tbl">
+      <thead><tr>
+        <th>Fecha</th><th>N° OC</th><th>Proveedor</th><th>Obra</th>
+        <th class="rr-c-eq">Equipo</th><th class="rr-c-resp">Responsable</th>
+        <th class="rr-n">Importe</th><th>Factura</th>
+      </tr></thead>
+      <tbody>
+        ${d.filas.map(({ oc, f, vencida }) => `
+          <tr class="rr-row" data-k="${esc(histKeyOf(oc))}" tabindex="0">
+            <td>${dm(oc.timestamp)}</td>
+            <td class="rr-nro">${esc(oc.nroOC)}</td>
+            <td title="${esc(oc.proveedor?.nombre || '')}">${esc(oc.proveedor?.nombre || '—')}</td>
+            <td title="${esc(oc.obra || '')}">${esc(oc.obra || 'Sin obra')}</td>
+            <td class="rr-c-eq" title="${esc(equipoLabel(oc.equipo))}">${esc(equipoLabel(oc.equipo) || '—')}</td>
+            <td class="rr-c-resp">${esc(oc.responsable?.nombre || '—')}</td>
+            <td class="rr-n">${fmtFull(oc.total, oc.moneda === 'USD' ? 'USD' : 'ARS')}</td>
+            <td><span class="rr-f rr-f--${f.estado}">${textoFactura(f, vencida)}</span></td>
+          </tr>`).join('')}
+      </tbody>
+    </table>`
+    : '<div class="rep-empty">No hay órdenes de compra emitidas en este período.</div>';
+
+  $('res-list').querySelectorAll('.rr-row').forEach(tr => {
+    tr.addEventListener('click', () => openOCDetail(tr.dataset.k));
+    tr.addEventListener('keydown', e => { if (e.key === 'Enter') openOCDetail(tr.dataset.k); });
+  });
+}
+
+function textoFactura(f, vencida) {
+  if (f.estado === 'con')   return 'Sí · ' + dm(f.ts);
+  if (f.estado === 'otros') return 'Sin rotular';
+  return vencida ? `No · +${DIAS_FACTURA} días` : 'No';
+}
+
+// ---- PDF del resumen ----
+function descargarResumenPDF() {
+  const d = resumenData();
+  const btn = $('btn-res-pdf');
+  btn.disabled = true;
+  try {
+    const notas = ['Sólo OC emitidas y autorizadas.'];
+    if (state.moneda === 'USD' || d.list.some(oc => oc.moneda === 'USD')) {
+      notas.push(`Totales en ${state.moneda} — dólar ${state.rate} de la fecha de cada OC; el importe de cada fila va en su moneda original.`);
+    }
+    if (d.noConv) notas.push(`${d.noConv} OC sin cotización disponible quedan fuera de los totales.`);
+
+    const ahora = new Date();
+    const data = {
+      rango:    labelRango(d.r),
+      subrango: d.r.desde && d.r.hasta ? `${d.r.desde} ${d.r.hasta}` : 'historial',
+      moneda:   state.moneda,
+      totalStr: fmtFull(d.total, state.moneda),
+      generado: `${dmy(ahora.getTime())} ${String(ahora.getHours()).padStart(2, '0')}:${String(ahora.getMinutes()).padStart(2, '0')}`,
+      notas,
+      kpis: [
+        { lbl: 'Total del período', val: fmtCompact(d.total, state.moneda),
+          sub: fmtVar(variacion(d.total, d.prevSuma), d.unidad) },
+        { lbl: 'OC emitidas', val: String(d.list.length),
+          sub: fmtVar(variacion(d.list.length, d.prevCount), d.unidad) },
+        { lbl: 'Con factura', val: String(d.fact.con),
+          sub: fmtCompact(d.fact.mCon, state.moneda), color: [30, 125, 58] },
+        { lbl: 'Sin factura', val: String(d.list.length - d.fact.con),
+          sub: fmtCompact(d.fact.mSin, state.moneda), color: [176, 42, 42] },
+        { lbl: `Sin factura +${DIAS_FACTURA} días`, val: String(d.fact.venc),
+          sub: d.fact.venc ? fmtCompact(d.fact.mVenc, state.moneda) + ' a reclamar' : 'nada pendiente',
+          color: d.fact.venc ? [154, 106, 0] : null }
+      ],
+      topObras: d.topObras.map(r => ({ label: r.label, val: fmtCompact(r.total, state.moneda),
+        pct: (d.total ? Math.round((r.total / d.total) * 100) : 0) + '%' })),
+      topProv: d.topProv.map(r => ({ label: r.label, val: fmtCompact(r.total, state.moneda),
+        pct: (d.total ? Math.round((r.total / d.total) * 100) : 0) + '%' })),
+      ocs: d.filas.map(({ oc, f, vencida }) => ({
+        fecha:       dm(oc.timestamp),
+        nroOC:       oc.nroOC,
+        proveedor:   oc.proveedor?.nombre || '—',
+        obra:        oc.obra || 'Sin obra',
+        equipo:      equipoLabel(oc.equipo) || '—',
+        responsable: oc.responsable?.nombre || '—',
+        importe:     fmtFull(oc.total, oc.moneda === 'USD' ? 'USD' : 'ARS'),
+        factura:     textoFactura(f, vencida),
+        facturaEstado: f.estado
+      }))
+    };
+
+    const blob = generateResumenBlob(data);
+    const url  = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = resumenFileName(data);
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 60000);
+  } catch (e) {
+    toast('No se pudo generar el PDF del resumen.', 'error');
+    console.error('resumenPDF:', e);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---- Controles del período ----
+// El preset escribe las fechas del panel: el resumen y el resto del reporte
+// miran siempre el mismo rango.
+function aplicarPeriodo() {
+  const r = rangoPeriodo(state.periodo, state.pOffset);
+  state.desde = r.desde; state.hasta = r.hasta;
+  $('rep-desde').value = r.desde; $('rep-hasta').value = r.hasta;
+  render();
+}
+
+function setPeriodo(tipo) {
+  if (state.periodo === tipo) {   // volver a tocarlo lo apaga
+    state.periodo = null; state.pOffset = 0;
+    syncPeriodoUI();
+    render();
+    return;
+  }
+  state.periodo = tipo; state.pOffset = 0;
+  syncPeriodoUI();
+  aplicarPeriodo();
+}
+
+function moverPeriodo(delta) {
+  if (!state.periodo) return;
+  const off = state.pOffset + delta;
+  if (off < 0) return;            // no hay períodos futuros que mostrar
+  state.pOffset = off;
+  aplicarPeriodo();
+}
+
+function syncPeriodoUI() {
+  [...$('seg-periodo').querySelectorAll('[data-per]')]
+    .forEach(b => b.classList.toggle('active', b.dataset.per === state.periodo));
+}
+
 function render() {
   const list  = getFiltered();
   const total = renderHero(list);
@@ -704,6 +1073,10 @@ function render() {
       oc => oc.responsable?.codigo || '—',
       oc => oc.responsable?.nombre || '—'),
     { grandTotal: grand, drill: true, emptyMsg: 'Sin responsables en el rango.' });
+
+  // Al final: resumenData() rearma el índice de proveedores para su propia
+  // lista y lo deja como lo espera el resto del panel.
+  renderResumen();
 }
 
 // ===================================================
@@ -1098,15 +1471,28 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   setupSegmented('seg-moneda', 'moneda');
   setupSegmented('seg-rate',   'rate');
-  $('rep-desde').addEventListener('change', () => { state.desde = $('rep-desde').value; render(); });
-  $('rep-hasta').addEventListener('change', () => { state.hasta = $('rep-hasta').value; render(); });
+  // Tocar las fechas a mano apaga el preset de período: el resumen pasa a
+  // describir el rango que puso el usuario.
+  const soltarPreset = () => { state.periodo = null; state.pOffset = 0; syncPeriodoUI(); };
+  $('rep-desde').addEventListener('change', () => { state.desde = $('rep-desde').value; soltarPreset(); render(); });
+  $('rep-hasta').addEventListener('change', () => { state.hasta = $('rep-hasta').value; soltarPreset(); render(); });
   $('chk-no-emitidas').addEventListener('change', e => { state.incluirNoEmitidas = e.target.checked; render(); });
   $('btn-clear-dates').addEventListener('click', () => {
     state.desde = ''; state.hasta = '';
     $('rep-desde').value = ''; $('rep-hasta').value = '';
+    soltarPreset();
     render();
   });
   $('btn-export').addEventListener('click', () => window.print());
+
+  // Resumen del período
+  $('seg-periodo').addEventListener('click', e => {
+    const btn = e.target.closest('[data-per]');
+    if (btn) setPeriodo(btn.dataset.per);
+  });
+  $('per-prev').addEventListener('click', () => moverPeriodo(1));
+  $('per-next').addEventListener('click', () => moverPeriodo(-1));
+  $('btn-res-pdf').addEventListener('click', descargarResumenPDF);
 
   // Ficha de OC
   $('foc-close').addEventListener('click', closeOCDetail);
