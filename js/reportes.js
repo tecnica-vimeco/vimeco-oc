@@ -534,18 +534,109 @@ function wireLineHover(el, rows, x, y, unit) {
   hit.addEventListener('touchend', hide);
 }
 
+// ===================================================
+//  Cards: plegado y buscador
+// ===================================================
+// Cada card de ranking se pliega desde su encabezado (mismo idioma que el
+// acordeón de la OC: click en el header, clase `collapsed`, chevron que gira) y
+// filtra sus filas con el buscador del encabezado. Lo que se pliega queda
+// guardado por navegador: el panel arranca como lo dejaste.
+
+const CARDS_LS = 'vimeco_rep_cards';
+
+const cardQ = {};    // texto buscado por card
+const _bars = {};    // últimas filas dibujadas por card, para refiltrar sin re-render global
+
+// Búsqueda tolerante: sin acentos y sin mayúsculas ("MOLIENDA" encuentra "Molienda",
+// "capilla" encuentra "UPC CAPILLA DEL MONTE").
+function normBuscar(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+}
+
+function cardsPlegadas() {
+  try { return new Set(JSON.parse(localStorage.getItem(CARDS_LS) || '[]')); }
+  catch (_) { return new Set(); }
+}
+
+function toggleCard(card) {
+  const id = card.dataset.card;
+  const plegada = card.classList.toggle('collapsed');
+  const head = card.querySelector('.card-header');
+  if (head) head.setAttribute('aria-expanded', String(!plegada));
+
+  const set = cardsPlegadas();
+  if (plegada) set.add(id); else set.delete(id);
+  try { localStorage.setItem(CARDS_LS, JSON.stringify([...set])); } catch (_) {}
+
+  // La evolución se dibuja al ancho real del contenedor: plegada mide 0, así
+  // que hay que redibujarla al abrirla (mismo motivo que el listener de resize).
+  if (id === 'rep-linea' && !plegada && lineData.rows.length) renderLine('rep-linea', lineData);
+}
+
+function setupCards() {
+  const plegadas = cardsPlegadas();
+  document.querySelectorAll('.rep-card[data-card]').forEach(card => {
+    const id   = card.dataset.card;
+    const head = card.querySelector('.card-header');
+    if (plegadas.has(id)) {
+      card.classList.add('collapsed');
+      if (head) head.setAttribute('aria-expanded', 'false');
+    }
+
+    // Los controles del encabezado (buscador, "Unificar obras", flechas del
+    // período) hacen lo suyo; el resto del header pliega.
+    head.addEventListener('click', e => {
+      if (e.target.closest('input, button, a, .seg')) return;
+      toggleCard(card);
+    });
+    head.addEventListener('keydown', e => {
+      if (e.target !== head) return;
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleCard(card); }
+    });
+
+    const q = card.querySelector('.rep-q');
+    if (q) q.addEventListener('input', () => {
+      cardQ[id] = q.value;
+      const b = _bars[id];
+      if (b) renderBars(id, b.rows, b.opts);   // sólo esta card, no todo el panel
+    });
+  });
+}
+
 // ---- Render de barras (con drill-down opcional) ----
 function renderBars(containerId, rows, opts = {}) {
   const el = $(containerId);
+  _bars[containerId] = { rows, opts };   // para poder refiltrar al tipear
+
+  // El rango del ranking se conserva al filtrar: buscar un proveedor chico lo
+  // muestra con su puesto real (#37) y su barra real, no como si fuera el #1.
+  const busca  = cardQ[containerId] || '';
+  const q      = normBuscar(busca);
+  const ranked = rows.map((r, i) => ({ ...r, rank: i + 1 }));
+  const hits   = q ? ranked.filter(r => normBuscar(r.label).includes(q)) : ranked;
+  const shown  = (!q && opts.limit) ? hits.slice(0, opts.limit) : hits;
+
+  const cnt = el.closest('.rep-card')?.querySelector('[data-count]');
+  if (cnt) {
+    cnt.textContent = !rows.length ? ''
+      : q                                     ? `${hits.length} de ${rows.length}`
+      : (opts.limit && rows.length > opts.limit) ? `top ${shown.length} de ${rows.length}`
+      : String(rows.length);
+  }
+
   if (!rows.length) {
     el.innerHTML = `<div class="rep-empty">${opts.emptyMsg || 'Sin datos en el rango seleccionado.'}</div>`;
     return;
   }
-  const shown = opts.limit ? rows.slice(0, opts.limit) : rows;
-  const max   = Math.max(...shown.map(r => r.total)) || 1;
+  if (!shown.length) {
+    el.innerHTML = `<div class="rep-empty">Sin resultados para «${esc(busca.trim())}».</div>`;
+    return;
+  }
+
+  const max   = Math.max(...ranked.map(r => r.total)) || 1;
   const grand = opts.grandTotal || max;
 
-  el.innerHTML = shown.map((r, i) => {
+  el.innerHTML = shown.map(r => {
     const pct  = Math.max(2, Math.round((r.total / max) * 100));
     const share = Math.round((r.total / grand) * 100);
     const rowKey = containerId + '|' + r.key;
@@ -594,7 +685,7 @@ function renderBars(containerId, rows, opts = {}) {
 
     return `
       <div class="rep-bar-row ${opts.drill ? 'rep-clickable' : ''} ${isOpen ? 'rep-open' : ''}" data-rowkey="${esc(rowKey)}">
-        <span class="rep-bar-rank">${i + 1}</span>
+        <span class="rep-bar-rank">${r.rank}</span>
         <div class="rep-bar-body">
           <div class="rep-bar-head">
             ${opts.drill ? `<span class="rep-caret">${icSvg('chevR')}</span>` : ''}
@@ -1493,6 +1584,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   $('per-prev').addEventListener('click', () => moverPeriodo(1));
   $('per-next').addEventListener('click', () => moverPeriodo(-1));
   $('btn-res-pdf').addEventListener('click', descargarResumenPDF);
+
+  // Plegado y buscador de las cards (restaura lo que quedó plegado la vez pasada).
+  setupCards();
 
   // Ficha de OC
   $('foc-close').addEventListener('click', closeOCDetail);

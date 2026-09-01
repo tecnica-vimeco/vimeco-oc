@@ -107,6 +107,25 @@
     .rep-card .card-title { font-size: .9rem; }
     .rep-card .card-body { padding: 1rem 1.15rem; }
 
+    /* ---- Cards desplegables (mismo idioma que el acordeón de la OC) ---- */
+    .rep-card[data-card] > .card-header { cursor: pointer; user-select: none; gap: .5rem .8rem; flex-wrap: wrap; }
+    .rep-card[data-card] > .card-header:focus-visible { outline: 2px solid var(--primary-light); outline-offset: -2px; }
+    .rep-chev { display: inline-flex; color: var(--primary-light); transition: transform .2s ease; }
+    .rep-chev .icon { width: 15px; height: 15px; display: block; }
+    .rep-card.collapsed .rep-chev { transform: rotate(-90deg); }
+    .rep-card.collapsed > .card-header { border-bottom: none; }
+    .rep-card.collapsed > .card-body { display: none; }
+    /* Buscador y controles se van con el cuerpo: no sirven de nada plegados. */
+    .rep-card.collapsed .rep-ch-r,
+    .rep-card.collapsed .rr-nav { display: none; }
+    /* Contador de filas: cuántas hay, cuántas se muestran, cuántas matchean. */
+    .rep-ch-n { font-size: .68rem; font-weight: 700; color: var(--gray-500); white-space: nowrap;
+      border: 1px solid var(--gray-200); border-radius: 999px; padding: .05rem .45rem; }
+    .rep-ch-r { display: inline-flex; align-items: center; gap: .5rem; }
+    .rep-q { width: 160px; max-width: 42vw; cursor: text; user-select: text; padding: .3rem .55rem; font: inherit; font-size: .78rem;
+      color: var(--gray-700); background: var(--white); border: 1px solid var(--gray-300); border-radius: var(--radius); }
+    .rep-q:focus { outline: 2px solid var(--primary-light); outline-offset: -1px; }
+
     /* ---- Participación por obra (part-to-whole) ---- */
     .rep-share-track { display: flex; gap: 2px; height: 32px; border-radius: 8px; overflow: hidden; margin-bottom: 1rem;
       box-shadow: inset 0 1px 2px rgba(17,24,39,.12); }
@@ -315,7 +334,9 @@
       @page { size: A4 portrait; margin: 12mm; }
       body { background: #fff; }
       .app-header, .rep-controls, .modal-overlay, .toast-container,
-      #btn-merge-obras, .rep-loading, .rr-nav, #btn-res-pdf { display: none !important; }
+      #btn-merge-obras, .rep-loading, .rr-nav, #btn-res-pdf,
+      .rep-q, .rep-chev { display: none !important; }
+      /* Se imprime lo que se ve: una card plegada queda plegada. */
       .app-main, .rep-wrap { padding: 0; max-width: none; }
       .rep-sections { gap: .6rem; }
       .rep-masonry { column-gap: .6rem; }
@@ -406,10 +427,10 @@
       <div id="rep-note" class="rep-note hidden"></div>
 
       <div class="rep-sections">
-        <div class="card rep-card rep-full" id="rep-res-card">
-          <div class="card-header rr-head">
+        <div class="card rep-card rep-full" id="rep-res-card" data-card="rep-res-card">
+          <div class="card-header rr-head" tabindex="0" aria-expanded="true">
             <div class="rr-head-l">
-              <span class="card-title">Resumen del período</span>
+              <span class="card-title"><span class="rep-chev"><svg class="icon" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></span>Resumen del período</span>
               <span class="rr-range" id="res-rango">—</span>
             </div>
             <div class="rr-nav rr-nav-off" id="rep-res-nav">
@@ -441,42 +462,60 @@
           <div class="card-body" id="rep-dup"></div>
         </div>
 
-        <div class="card rep-card rep-full">
-          <div class="card-header"><span class="card-title" id="rep-linea-title">Evolución</span></div>
+        <div class="card rep-card rep-full" data-card="rep-linea">
+          <div class="card-header" tabindex="0" aria-expanded="true">
+            <span class="card-title"><span class="rep-chev"><svg class="icon" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></span><span id="rep-linea-title">Evolución</span></span>
+          </div>
           <div class="card-body"><div class="rep-line" id="rep-linea"></div></div>
         </div>
 
-        <div class="card rep-card rep-full">
-          <div class="card-header"><span class="card-title">Participación por obra</span></div>
+        <div class="card rep-card rep-full" data-card="rep-share">
+          <div class="card-header" tabindex="0" aria-expanded="true">
+            <span class="card-title"><span class="rep-chev"><svg class="icon" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></span>Participación por obra</span>
+          </div>
           <div class="card-body" id="rep-share"></div>
         </div>
 
-        <div class="card rep-card rep-full">
-          <div class="card-header">
-            <span class="card-title">Gasto por Obra</span>
-            <button class="btn btn-outline btn-sm" id="btn-merge-obras">Unificar obras</button>
+        <div class="card rep-card rep-full" data-card="rep-obras">
+          <div class="card-header" tabindex="0" aria-expanded="true">
+            <span class="card-title"><span class="rep-chev"><svg class="icon" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></span>Gasto por Obra<span class="rep-ch-n" data-count></span></span>
+            <span class="rep-ch-r">
+              <input type="search" class="rep-q" placeholder="Buscar obra…" aria-label="Buscar obra">
+              <button class="btn btn-outline btn-sm" id="btn-merge-obras">Unificar obras</button>
+            </span>
           </div>
           <div class="card-body" id="rep-obras"></div>
         </div>
 
         <div class="rep-masonry">
-          <div class="card rep-card">
-            <div class="card-header"><span class="card-title">Top proveedores</span></div>
+          <div class="card rep-card" data-card="rep-proveedores">
+            <div class="card-header" tabindex="0" aria-expanded="true">
+              <span class="card-title"><span class="rep-chev"><svg class="icon" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></span>Top proveedores<span class="rep-ch-n" data-count></span></span>
+              <span class="rep-ch-r"><input type="search" class="rep-q" placeholder="Buscar proveedor…" aria-label="Buscar proveedor"></span>
+            </div>
             <div class="card-body" id="rep-proveedores"></div>
           </div>
 
-          <div class="card rep-card">
-            <div class="card-header"><span class="card-title">Gasto por Equipo</span></div>
+          <div class="card rep-card" data-card="rep-equipos">
+            <div class="card-header" tabindex="0" aria-expanded="true">
+              <span class="card-title"><span class="rep-chev"><svg class="icon" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></span>Gasto por Equipo<span class="rep-ch-n" data-count></span></span>
+              <span class="rep-ch-r"><input type="search" class="rep-q" placeholder="Buscar equipo o patente…" aria-label="Buscar equipo"></span>
+            </div>
             <div class="card-body" id="rep-equipos"></div>
           </div>
 
-          <div class="card rep-card">
-            <div class="card-header"><span class="card-title">Por responsable</span></div>
+          <div class="card rep-card" data-card="rep-responsables">
+            <div class="card-header" tabindex="0" aria-expanded="true">
+              <span class="card-title"><span class="rep-chev"><svg class="icon" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></span>Por responsable<span class="rep-ch-n" data-count></span></span>
+              <span class="rep-ch-r"><input type="search" class="rep-q" placeholder="Buscar responsable…" aria-label="Buscar responsable"></span>
+            </div>
             <div class="card-body" id="rep-responsables"></div>
           </div>
 
-          <div class="card rep-card">
-            <div class="card-header"><span class="card-title">Repuestos vs Mantenimiento</span></div>
+          <div class="card rep-card" data-card="rep-categorias">
+            <div class="card-header" tabindex="0" aria-expanded="true">
+              <span class="card-title"><span class="rep-chev"><svg class="icon" viewBox="0 0 24 24"><polyline points="6 9 12 15 18 9"/></svg></span>Repuestos vs Mantenimiento</span>
+            </div>
             <div class="card-body" id="rep-categorias"></div>
           </div>
         </div>
